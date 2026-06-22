@@ -346,15 +346,7 @@ export class UVIndexChartCard extends LitElement {
         maintainAspectRatio: true,
         plugins: {
           legend: {
-            display: true,
-            labels: {
-              color: 'rgba(255, 255, 255, 0.7)',
-              font: {
-                size: 12,
-                weight: 600 as const
-              },
-              padding: 15
-            }
+            display: false
           },
           tooltip: {
             enabled: true,
@@ -390,8 +382,8 @@ export class UVIndexChartCard extends LitElement {
               font: {
                 size: 11
               },
-              maxRotation: 45,
-              minRotation: 45
+              maxRotation: 90,
+              minRotation: 90
             }
           },
           y: {
