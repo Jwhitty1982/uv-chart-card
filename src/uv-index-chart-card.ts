@@ -86,6 +86,7 @@ export class UVIndexChartCard extends LitElement {
 
   private chart: Chart | null = null;
   private chartContainer: HTMLCanvasElement | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
 
   /**
    * Validate configuration when it's set
@@ -106,6 +107,18 @@ export class UVIndexChartCard extends LitElement {
    */
   protected firstUpdated() {
     setTimeout(() => this.updateChart(), 0);
+
+    // Rebuild chart when the card is resized (e.g. dashboard panel resizes)
+    this._resizeObserver = new ResizeObserver(() => {
+      this.updateChart();
+    });
+    this._resizeObserver.observe(this);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._resizeObserver?.disconnect();
+    this.chart?.destroy();
   }
 
   /**
@@ -338,12 +351,16 @@ export class UVIndexChartCard extends LitElement {
       }
     };
 
+    const cardWidth = this.offsetWidth || 400;
+    const axisFontSize = Math.max(8, Math.min(11, cardWidth / 42));
+    const titleFontSize = Math.max(9, Math.min(12, cardWidth / 36));
+
     return new Chart(ctx, {
       type: 'bar',
       data,
       options: {
         responsive: true,
-        maintainAspectRatio: true,
+        maintainAspectRatio: false,
         plugins: {
           legend: {
             display: false
@@ -380,7 +397,7 @@ export class UVIndexChartCard extends LitElement {
             ticks: {
               color: 'rgba(255, 255, 255, 0.6)',
               font: {
-                size: 11
+                size: axisFontSize
               },
               maxRotation: 90,
               minRotation: 90
@@ -398,7 +415,7 @@ export class UVIndexChartCard extends LitElement {
             ticks: {
               color: 'rgba(255, 255, 255, 0.6)',
               font: {
-                size: 11
+                size: axisFontSize
               },
               stepSize: 2
             },
@@ -407,7 +424,7 @@ export class UVIndexChartCard extends LitElement {
               text: 'UV Index',
               color: 'rgba(255, 255, 255, 0.7)',
               font: {
-                size: 12,
+                size: titleFontSize,
                 weight: 600 as const
               }
             }
@@ -600,26 +617,24 @@ export class UVIndexChartCard extends LitElement {
   static styles = css`
     :host {
       display: block;
-      --card-background: rgba(255, 255, 255, 0.04);
-      --card-border-color: rgba(255, 255, 255, 0.08);
     }
 
-    .card {
-      background: var(--card-background);
-      backdrop-filter: blur(12px) saturate(140%);
-      -webkit-backdrop-filter: blur(12px) saturate(140%);
-      border: 1px solid var(--card-border-color);
-      border-radius: 16px;
-      padding: 20px;
+    ha-card {
+      /* Defaults — all overridable via style: in Lovelace */
+      background: var(--uv-card-background, rgba(0, 0, 0, 0.28));
+      backdrop-filter: var(--uv-card-backdrop, blur(14px) saturate(160%));
+      -webkit-backdrop-filter: var(--uv-card-backdrop, blur(14px) saturate(160%));
+      border: var(--uv-card-border, 1px solid rgba(255, 255, 255, 0.12));
+      border-radius: var(--uv-card-radius, 16px);
+      padding: var(--uv-card-padding, 20px);
       color: rgba(255, 255, 255, 0.87);
-      box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.25);
-      transition: all 0.3s ease;
+      box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.3);
+      transition: box-shadow 0.3s ease;
+      overflow: hidden;
     }
 
-    .card:hover {
-      background: rgba(255, 255, 255, 0.07);
-      border-color: rgba(255, 255, 255, 0.14);
-      box-shadow: 0 6px 24px 0 rgba(0, 0, 0, 0.35);
+    ha-card:hover {
+      box-shadow: 0 6px 24px 0 rgba(0, 0, 0, 0.4);
     }
 
     .header {
@@ -660,7 +675,10 @@ export class UVIndexChartCard extends LitElement {
     .chart-wrapper {
       position: relative;
       width: 100%;
-      height: 300px;
+      /* Scale height with width: ~2.5:1 ratio looks good on all breakpoints */
+      aspect-ratio: 2.5 / 1;
+      min-height: 160px;
+      max-height: 340px;
       margin-bottom: 16px;
     }
 
@@ -734,19 +752,8 @@ export class UVIndexChartCard extends LitElement {
 
     /* Mobile responsiveness */
     @media (max-width: 600px) {
-      .card {
-        padding: 16px;
-        border-radius: 16px;
-      }
-
-      .header {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 12px;
-      }
-
-      .chart-wrapper {
-        height: 240px;
+      ha-card {
+        padding: 14px;
       }
 
       .title {
@@ -775,11 +782,11 @@ export class UVIndexChartCard extends LitElement {
 
     if (!entity) {
       return html`
-        <div class="card">
+        <ha-card>
           <div class="error">
             Entity <strong>${this.config.entity}</strong> not found. Please verify your configuration.
           </div>
-        </div>
+        </ha-card>
       `;
     }
 
@@ -787,7 +794,7 @@ export class UVIndexChartCard extends LitElement {
     const currentTime = new Date();
 
     return html`
-      <div class="card">
+      <ha-card>
         <div class="header">
           <h2 class="title">UV Index Forecast</h2>
           <div class="current-uv">
@@ -833,7 +840,7 @@ export class UVIndexChartCard extends LitElement {
             <span class="info-value">${currentTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
           </div>
         </div>
-      </div>
+      </ha-card>
     `;
   }
 }
