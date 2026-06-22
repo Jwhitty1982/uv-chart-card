@@ -47,8 +47,9 @@ interface UVDataPoint {
  * Sunrise/sunset times for shading
  */
 interface SunTimes {
-  sunrise: number;
-  sunset: number;
+  // Arrays so we can cover the full 36-hour window (may span 2 days)
+  sunrises: number[];
+  sunsets: number[];
 }
 
 /**
@@ -295,13 +296,19 @@ export class UVIndexChartCard extends LitElement {
     const sunEntity = this._hass?.states['sun.sun'];
     if (!sunEntity) {
       console.warn('sun.sun entity not found for shading');
-      return { sunrise: 0, sunset: 0 };
+      return { sunrises: [], sunsets: [] };
     }
 
-    const sunrise = new Date(sunEntity.attributes?.next_sunrise).getTime();
-    const sunset = new Date(sunEntity.attributes?.next_sunset).getTime();
+    // HA only gives us next_sunrise / next_sunset. We approximate the previous
+    // ones by subtracting 24 h so we cover the full synthetic-past window.
+    const nextRise = new Date(sunEntity.attributes?.next_rising ?? sunEntity.attributes?.next_sunrise).getTime();
+    const nextSet  = new Date(sunEntity.attributes?.next_setting ?? sunEntity.attributes?.next_sunset).getTime();
+    const DAY = 86400000;
 
-    return { sunrise, sunset };
+    return {
+      sunrises: [nextRise - DAY, nextRise],
+      sunsets:  [nextSet  - DAY, nextSet]
+    };
   }
 
   /**
@@ -346,6 +353,7 @@ export class UVIndexChartCard extends LitElement {
       id: 'nowLinePlugin',
       afterDraw: (chart: any) => {
         this.drawSunriseSetShading(chart, data.datasets[0].metadata);
+        this.drawMidnightLines(chart, data.datasets[0].metadata);
         this.drawNowLine(chart);
         this.drawPeakUVMarker(chart, data.datasets[0].metadata);
       }
@@ -549,13 +557,11 @@ export class UVIndexChartCard extends LitElement {
   }
 
   /**
-   * Draw sunrise/sunset shading on the chart background
+   * Draw smooth gradient sky shading across the full chart window.
    *
-   * Creates a semi-transparent overlay for night periods
-   * based on sun.sun entity data to show when UV exposure is minimal
-   *
-   * @param chart - Chart.js instance
-   * @param metadata - Chart metadata with sun times
+   * For each hour we interpolate a sky-darkness value (0 = full day, 1 = full night)
+   * based on distance to the nearest sunrise/sunset, then render it as a
+   * top-anchored semi-transparent gradient band so bars are still clearly visible.
    */
   private drawSunriseSetShading(chart: any, metadata: any) {
     const ctx = chart.ctx;
@@ -564,52 +570,142 @@ export class UVIndexChartCard extends LitElement {
 
     if (!xScale || !yScale || !metadata?.sunTimes) return;
 
-    const { sunrise, sunset } = metadata.sunTimes;
-    const { currentTime } = metadata;
-    const dataPoints = metadata.dataPoints;
+    const { sunrises, sunsets } = metadata.sunTimes as SunTimes;
+    if (!sunrises.length && !sunsets.length) return;
 
-    // Find indices for sunrise/sunset within the chart's data range
-    const firstTime = dataPoints[0]?.timestamp || 0;
-    const lastTime = dataPoints[dataPoints.length - 1]?.timestamp || 0;
+    const dataPoints: UVDataPoint[] = metadata.dataPoints;
+    if (!dataPoints.length) return;
 
-    // Bar center x helper: evenly spaced across the plot area
-    const numBars = dataPoints.length || 1;
+    const numBars = dataPoints.length;
     const barStep = (xScale.right - xScale.left) / numBars;
-    const barX = (i: number): number => xScale.left + (i + 0.5) * barStep;
+    // Twilight half-width in ms: 45-minute fade on each side of sunrise/sunset
+    const TWILIGHT = 45 * 60 * 1000;
 
-    // Shade night period before sunrise
-    if (sunrise > firstTime && sunrise < lastTime) {
-      const sunriseIndex = dataPoints.findIndex((p: UVDataPoint) => p.timestamp >= sunrise);
-      if (sunriseIndex > 0) {
-        this.drawShading(ctx, xScale.left, barX(sunriseIndex), yScale.top, yScale.bottom, 'night');
-      }
-    }
+    // Helper: 0 = day, 1 = night for a given timestamp
+    const skyDarkness = (ts: number): number => {
+      // Build sorted list of all events tagged as 'rise' or 'set'
+      type Event = { t: number; type: 'rise' | 'set' };
+      const events: Event[] = [
+        ...sunrises.map(t => ({ t, type: 'rise' as const })),
+        ...sunsets.map(t => ({ t, type: 'set' as const }))
+      ].sort((a, b) => a.t - b.t);
 
-    // Shade night period after sunset
-    if (sunset > firstTime && sunset < lastTime) {
-      const sunsetIndex = dataPoints.findIndex((p: UVDataPoint) => p.timestamp >= sunset);
-      if (sunsetIndex >= 0) {
-        this.drawShading(ctx, barX(sunsetIndex), xScale.right, yScale.top, yScale.bottom, 'night');
+      if (!events.length) return 0;
+
+      // Find the two bracketing events
+      let before = events[0];
+      let after  = events[events.length - 1];
+      for (let i = 0; i < events.length - 1; i++) {
+        if (events[i].t <= ts && events[i + 1].t > ts) {
+          before = events[i];
+          after  = events[i + 1];
+          break;
+        }
       }
+
+      // During day (between rise and next set): darkness = 0
+      // During night (between set and next rise): darkness = 1
+      // In twilight window: linear ramp
+      const inTwilight = (edge: Event): number => {
+        const dist = Math.abs(ts - edge.t);
+        if (dist >= TWILIGHT) return edge.type === 'rise' ? (ts < edge.t ? 1 : 0)
+                                                           : (ts < edge.t ? 0 : 1);
+        const frac = dist / TWILIGHT;
+        return edge.type === 'rise'
+          ? (ts < edge.t ? frac : 1 - frac)
+          : (ts < edge.t ? 1 - frac : frac);
+      };
+
+      // If close to any event use its twilight ramp, otherwise use midpoint state
+      for (const ev of events) {
+        if (Math.abs(ts - ev.t) < TWILIGHT) return inTwilight(ev);
+      }
+
+      // Midpoint: fully day or night depending on bracket
+      return before.type === 'rise' ? 0 : 1;
+    };
+
+    // Draw one vertical strip per bar
+    for (let i = 0; i < numBars; i++) {
+      const ts  = dataPoints[i]?.timestamp ?? 0;
+      const darkness = skyDarkness(ts);
+      if (darkness < 0.04) continue; // skip fully-lit bars
+
+      const x = xScale.left + i * barStep;
+      const h = yScale.bottom - yScale.top;
+
+      // Gradient: dark at top, transparent at bottom so bars show through
+      const grad = ctx.createLinearGradient(x, yScale.top, x, yScale.bottom);
+      const alpha = darkness * 0.38;
+      grad.addColorStop(0,   `rgba(10, 15, 60, ${alpha})`);
+      grad.addColorStop(0.6, `rgba(10, 15, 60, ${alpha * 0.5})`);
+      grad.addColorStop(1,   'rgba(10, 15, 60, 0)');
+
+      ctx.save();
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, yScale.top, barStep, h);
+      ctx.restore();
     }
   }
 
   /**
-   * Helper function to draw semi-transparent shading areas
-   *
-   * @param ctx - Canvas context
-   * @param x1 - Start x position
-   * @param x2 - End x position
-   * @param y1 - Start y position
-   * @param y2 - End y position
-   * @param type - Shading type ('night' or other)
+   * Draw a subtle vertical line + date label at every midnight boundary
+   * that falls within the chart's time window.
    */
-  private drawShading(ctx: CanvasRenderingContext2D, x1: number, x2: number, y1: number, y2: number, type: string) {
-    ctx.save();
-    ctx.fillStyle = type === 'night' ? 'rgba(0, 0, 0, 0.15)' : 'rgba(255, 255, 0, 0.05)';
-    ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-    ctx.restore();
+  private drawMidnightLines(chart: any, metadata: any) {
+    const ctx = chart.ctx;
+    const xScale = chart.scales.x;
+    const yScale = chart.scales.y;
+
+    const dataPoints: UVDataPoint[] = metadata?.dataPoints;
+    if (!dataPoints?.length || !xScale || !yScale) return;
+
+    const numBars = dataPoints.length;
+    const barStep = (xScale.right - xScale.left) / numBars;
+    const firstTs = dataPoints[0].timestamp;
+    const lastTs  = dataPoints[numBars - 1].timestamp;
+
+    // Find every midnight (local time) between firstTs and lastTs
+    const midnights: number[] = [];
+    const d = new Date(firstTs);
+    d.setHours(24, 0, 0, 0); // next midnight from start
+    while (d.getTime() <= lastTs) {
+      midnights.push(d.getTime());
+      d.setDate(d.getDate() + 1);
+    }
+
+    for (const midnight of midnights) {
+      // Find the bar index immediately after midnight
+      const idx = dataPoints.findIndex(p => p.timestamp >= midnight);
+      if (idx < 0) continue;
+
+      const xPos = xScale.left + idx * barStep;
+
+      // Thin dashed line
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(xPos, yScale.top);
+      ctx.lineTo(xPos, yScale.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Date label (e.g. "Mon 23") just inside the top of the chart
+      const label = new Date(midnight).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(label, xPos + 3, yScale.top + 12);
+      ctx.restore();
+    }
   }
+
+  /**
+   * @deprecated replaced by gradient shading — kept as no-op for safety
+   */
+  private drawShading(_ctx: CanvasRenderingContext2D, _x1: number, _x2: number, _y1: number, _y2: number, _type: string) {}
 
   /**
    * Define component styles with glassmorphism
