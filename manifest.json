@@ -1,0 +1,24 @@
+{
+  "domain": "uv_index_chart_card",
+  "name": "UV Index Chart Card",
+  "codeowners": ["@yourname"],
+  "config": {
+    "step": {
+      "user": {
+        "type": "form",
+        "data_schema": {
+          "entity": "string",
+          "hours_back": "integer",
+          "hours_forward": "integer"
+        }
+      }
+    }
+  },
+  "documentation": "https://github.com/yourusername/uv-index-chart-card",
+  "homeassistant": {
+    "manifest_version": 1,
+    "documentation": "https://github.com/yourusername/uv-index-chart-card",
+    "requirements": []
+  },
+  "iot_class": "local_polling"
+}

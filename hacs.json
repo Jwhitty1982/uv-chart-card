@@ -1,0 +1,9 @@
+{
+  "name": "UV Index Chart Card",
+  "homeassistant": "2024.1.0",
+  "render_readme": true,
+  "filename": "uv-index-chart-card.js",
+  "country": ["US"],
+  "domains": ["weather", "sensor"],
+  "iot_class": "local_polling"
+}
