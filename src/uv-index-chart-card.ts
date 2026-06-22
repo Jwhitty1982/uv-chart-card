@@ -142,19 +142,23 @@ export class UVIndexChartCard extends LitElement {
     const currentUV = parseFloat(entity.state) || 0;
     const hourlyData = entity.attributes?.hourly || [];
 
-    // Generate synthetic past data
-    const pastData = this.generateSyntheticPastData(currentUV, hoursBack);
-
-    // Process forecast data
+    // Process forecast data from entity attributes (OpenWeatherMap One Call style)
+    // Supports hourly items such as: { dt: 1719032400, uvi: 4.2 }.
     const forecastData = this.processForecastData(hourlyData, hoursForward);
+
+    // Add a synthetic past segment before the first forecast point.
+    // This creates the desired 12h past + 24h future window.
+    const firstForecastTimestamp = forecastData[0]?.timestamp ?? Date.now();
+    const firstForecastUV = forecastData[0]?.uv ?? currentUV;
+    const pastData = this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
 
     // Combine all data points
     const allData = [...pastData, ...forecastData];
 
-    // Generate labels (timestamps)
+    // Generate labels from each data point timestamp
     const now = new Date();
-    const labels = allData.map((_, i) => {
-      const time = new Date(now.getTime() - (hoursBack - i) * 3600000);
+    const labels = allData.map((point) => {
+      const time = new Date(point.timestamp);
       return time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     });
 
@@ -196,39 +200,28 @@ export class UVIndexChartCard extends LitElement {
    * 2. Fading down to a lower baseline as we go backward in time
    * 3. Adding slight random variation for realism
    *
-   * @param currentUV - Current UV index value
+   * @param anchorUV - UV index value at the first forecast point
+   * @param anchorTimestamp - Timestamp of the first forecast point
    * @param hoursBack - Number of synthetic hours to generate
    * @returns Array of synthetic UV data points
    */
-  private generateSyntheticPastData(currentUV: number, hoursBack: number): UVDataPoint[] {
+  private generateSyntheticPastData(anchorUV: number, anchorTimestamp: number, hoursBack: number): UVDataPoint[] {
     const data: UVDataPoint[] = [];
-    const now = new Date();
 
     for (let i = hoursBack; i > 0; i--) {
-      // Fade from current UV down to ~30% of current UV as we go back
-      const fadeFactor = i / hoursBack;
-      const baselineUV = currentUV * 0.3;
-      const syntheticUV = baselineUV + (currentUV - baselineUV) * fadeFactor;
-
-      // Add slight random variation (±10%)
-      const randomVariation = (Math.random() - 0.5) * (currentUV * 0.1);
-      const finalUV = Math.max(0, syntheticUV + randomVariation);
+      // Build a smooth fade from low UV (older) up to anchorUV (newer)
+      const progress = (hoursBack - i + 1) / hoursBack;
+      const baselineUV = anchorUV * 0.2;
+      const syntheticUV = baselineUV + (anchorUV - baselineUV) * progress;
+      const finalUV = Math.max(0, syntheticUV);
 
       data.push({
-        timestamp: now.getTime() - i * 3600000,
+        timestamp: anchorTimestamp - i * 3600000,
         uv: Math.round(finalUV * 10) / 10,
         isSynthetic: true,
         isForecast: false
       });
     }
-
-    // Add current hour
-    data.push({
-      timestamp: now.getTime(),
-      uv: currentUV,
-      isSynthetic: false,
-      isForecast: false
-    });
 
     return data;
   }
@@ -245,14 +238,20 @@ export class UVIndexChartCard extends LitElement {
    */
   private processForecastData(hourlyData: any[], hoursForward: number): UVDataPoint[] {
     const data: UVDataPoint[] = [];
-    const now = new Date();
+    const nowTs = Date.now();
 
     for (let i = 0; i < Math.min(hoursForward, hourlyData.length); i++) {
       const hourlyItem = hourlyData[i];
-      const uvValue = parseFloat(hourlyItem?.uv) || 0;
+      const uvValue = parseFloat(hourlyItem?.uvi ?? hourlyItem?.uv ?? hourlyItem?.value) || 0;
+
+      // OpenWeatherMap uses Unix seconds in `dt`.
+      const rawDt = Number(hourlyItem?.dt);
+      const timestamp = Number.isFinite(rawDt) && rawDt > 0
+        ? (rawDt > 1e12 ? rawDt : rawDt * 1000)
+        : nowTs + i * 3600000;
 
       data.push({
-        timestamp: now.getTime() + (i + 1) * 3600000,
+        timestamp,
         uv: uvValue,
         isSynthetic: false,
         isForecast: true
@@ -432,11 +431,21 @@ export class UVIndexChartCard extends LitElement {
 
     if (!xScale || !yScale) return;
 
-    // Position at the current hour (synthetic data + current hour = split point)
+    // Position the line at the bar closest to current time.
     const dataPoints = chart.data.datasets[0].metadata?.dataPoints || [];
-    const currentIndex = dataPoints.findIndex((p: UVDataPoint) => !p.isSynthetic && !p.isForecast);
+    if (!dataPoints.length) return;
 
-    if (currentIndex < 0) return;
+    const nowTs = Date.now();
+    let currentIndex = 0;
+    let minDelta = Number.POSITIVE_INFINITY;
+
+    dataPoints.forEach((p: UVDataPoint, index: number) => {
+      const delta = Math.abs(p.timestamp - nowTs);
+      if (delta < minDelta) {
+        minDelta = delta;
+        currentIndex = index;
+      }
+    });
 
     const xPos = xScale.getPixelForTick(currentIndex);
 
