@@ -63,7 +63,25 @@ interface UVCardConfig {
 
 @customElement('uv-index-chart-card')
 export class UVIndexChartCard extends LitElement {
-  @property() hass: any;
+  // Use a setter so we only redraw when the relevant entity actually changes,
+  // not on every hass update (which fires every second).
+  private _hass: any;
+  private _lastEntityState: string = '';
+  private _lastEntityHourly: string = '';
+
+  set hass(h: any) {
+    this._hass = h;
+    const entity = h?.states?.[this.config?.entity!];
+    const newState = entity?.state ?? '';
+    const newHourly = JSON.stringify(entity?.attributes?.hourly?.[0]) ?? '';
+    if (newState !== this._lastEntityState || newHourly !== this._lastEntityHourly) {
+      this._lastEntityState = newState;
+      this._lastEntityHourly = newHourly;
+      this.updateChart();
+    }
+  }
+  get hass() { return this._hass; }
+
   @property() config: UVCardConfig = { entity: '' };
 
   private chart: Chart | null = null;
@@ -84,19 +102,10 @@ export class UVIndexChartCard extends LitElement {
   }
 
   /**
-   * Lifecycle: Component is ready to update
+   * Lifecycle: first render — draw chart once the canvas is in the DOM
    */
   protected firstUpdated() {
-    setTimeout(() => {
-      this.updateChart();
-    }, 0);
-  }
-
-  /**
-   * Lifecycle: Component updates
-   */
-  protected updated() {
-    this.updateChart();
+    setTimeout(() => this.updateChart(), 0);
   }
 
   /**
@@ -131,7 +140,7 @@ export class UVIndexChartCard extends LitElement {
    * 5. Apply risk-based colors to each bar
    */
   private prepareChartData(): any {
-    const entity = this.hass.states[this.config.entity!];
+    const entity = this._hass?.states[this.config.entity!];
     if (!entity) {
       console.warn(`Entity ${this.config.entity} not found`);
       return { labels: [], datasets: [] };
@@ -270,7 +279,7 @@ export class UVIndexChartCard extends LitElement {
    * @returns Object with sunrise and sunset timestamps
    */
   private getSunTimes(): SunTimes {
-    const sunEntity = this.hass.states['sun.sun'];
+    const sunEntity = this._hass?.states['sun.sun'];
     if (!sunEntity) {
       console.warn('sun.sun entity not found for shading');
       return { sunrise: 0, sunset: 0 };
@@ -317,14 +326,14 @@ export class UVIndexChartCard extends LitElement {
   private createChart(canvas: HTMLCanvasElement, data: any): Chart {
     const ctx = canvas.getContext('2d')!;
 
-    // Register plugins for custom rendering
+    // Register plugins for custom rendering.
+    // ALL drawing goes in afterDraw so Chart.js has already calculated
+    // bar positions (getDatasetMeta(0).data[i].x is only valid post-layout).
     const nowLinePlugin = {
       id: 'nowLinePlugin',
-      beforeDraw: (chart: any) => {
-        this.drawNowLine(chart);
+      afterDraw: (chart: any) => {
         this.drawSunriseSetShading(chart, data.datasets[0].metadata);
-      },
-      afterDatasetsDraw: (chart: any) => {
+        this.drawNowLine(chart);
         this.drawPeakUVMarker(chart, data.datasets[0].metadata);
       }
     };
@@ -387,7 +396,8 @@ export class UVIndexChartCard extends LitElement {
           },
           y: {
             beginAtZero: true,
-            max: 16,
+            // Dynamic max: at least 12, or peak UV rounded up to next even + 2
+            max: Math.max(12, Math.ceil(Math.max(...(data.datasets[0].data as number[])) / 2) * 2 + 2),
             stacked: false,
             grid: {
               color: 'rgba(255, 255, 255, 0.08)'
@@ -447,13 +457,14 @@ export class UVIndexChartCard extends LitElement {
       }
     });
 
-    // Use the actual bar's pixel x — getPixelForTick() indexes visible ticks, not bars
-    const barMeta = chart.getDatasetMeta(0);
-    const xPos: number = barMeta.data[currentIndex]?.x ?? xScale.getPixelForValue(currentIndex);
+    // Bar center x: evenly spaced across the plot area
+    const numBars = chart.data.labels?.length || 1;
+    const barStep = (xScale.right - xScale.left) / numBars;
+    const xPos = xScale.left + (currentIndex + 0.5) * barStep;
 
-    // Draw line
+    // Draw dashed vertical line
     ctx.save();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.lineWidth = 2;
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -462,9 +473,9 @@ export class UVIndexChartCard extends LitElement {
     ctx.stroke();
     ctx.restore();
 
-    // Draw label inside the chart area so it can't be clipped
+    // Label inside the chart area
     ctx.save();
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('NOW', xPos, yScale.top + 14);
@@ -497,9 +508,10 @@ export class UVIndexChartCard extends LitElement {
       }
     });
 
-    // Use the actual bar's pixel x — getPixelForTick() indexes visible ticks, not bars
-    const barMeta = chart.getDatasetMeta(0);
-    const xPos: number = barMeta.data[peakIndex]?.x ?? xScale.getPixelForValue(peakIndex);
+    // Bar center x: evenly spaced across the plot area
+    const numBars = chart.data.labels?.length || 1;
+    const barStep = (xScale.right - xScale.left) / numBars;
+    const xPos = xScale.left + (peakIndex + 0.5) * barStep;
     const yPos = yScale.getPixelForValue(peakUV);
 
     // Draw glowing effect
@@ -552,10 +564,10 @@ export class UVIndexChartCard extends LitElement {
     const firstTime = dataPoints[0]?.timestamp || 0;
     const lastTime = dataPoints[dataPoints.length - 1]?.timestamp || 0;
 
-    // Use actual bar pixel positions — getPixelForTick() indexes visible ticks, not bars
-    const barMeta = chart.getDatasetMeta(0);
-    const barX = (i: number): number =>
-      barMeta.data[i]?.x ?? xScale.getPixelForValue(i);
+    // Bar center x helper: evenly spaced across the plot area
+    const numBars = dataPoints.length || 1;
+    const barStep = (xScale.right - xScale.left) / numBars;
+    const barX = (i: number): number => xScale.left + (i + 0.5) * barStep;
 
     // Shade night period before sunrise
     if (sunrise > firstTime && sunrise < lastTime) {
@@ -768,7 +780,7 @@ export class UVIndexChartCard extends LitElement {
    * Render the custom card component
    */
   protected render() {
-    const entity = this.hass.states[this.config.entity!];
+    const entity = this._hass?.states[this.config.entity!];
 
     if (!entity) {
       return html`
