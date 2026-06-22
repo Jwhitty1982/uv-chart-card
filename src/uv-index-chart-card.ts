@@ -447,11 +447,13 @@ export class UVIndexChartCard extends LitElement {
       }
     });
 
-    const xPos = xScale.getPixelForTick(currentIndex);
+    // Use the actual bar's pixel x — getPixelForTick() indexes visible ticks, not bars
+    const barMeta = chart.getDatasetMeta(0);
+    const xPos: number = barMeta.data[currentIndex]?.x ?? xScale.getPixelForValue(currentIndex);
 
     // Draw line
     ctx.save();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
     ctx.lineWidth = 2;
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -460,12 +462,12 @@ export class UVIndexChartCard extends LitElement {
     ctx.stroke();
     ctx.restore();
 
-    // Draw label
+    // Draw label inside the chart area so it can't be clipped
     ctx.save();
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('NOW', xPos, yScale.top - 8);
+    ctx.fillText('NOW', xPos, yScale.top + 14);
     ctx.restore();
   }
 
@@ -495,7 +497,9 @@ export class UVIndexChartCard extends LitElement {
       }
     });
 
-    const xPos = xScale.getPixelForTick(peakIndex);
+    // Use the actual bar's pixel x — getPixelForTick() indexes visible ticks, not bars
+    const barMeta = chart.getDatasetMeta(0);
+    const xPos: number = barMeta.data[peakIndex]?.x ?? xScale.getPixelForValue(peakIndex);
     const yPos = yScale.getPixelForValue(peakUV);
 
     // Draw glowing effect
@@ -548,23 +552,24 @@ export class UVIndexChartCard extends LitElement {
     const firstTime = dataPoints[0]?.timestamp || 0;
     const lastTime = dataPoints[dataPoints.length - 1]?.timestamp || 0;
 
-    // Calculate night time before sunrise
+    // Use actual bar pixel positions — getPixelForTick() indexes visible ticks, not bars
+    const barMeta = chart.getDatasetMeta(0);
+    const barX = (i: number): number =>
+      barMeta.data[i]?.x ?? xScale.getPixelForValue(i);
+
+    // Shade night period before sunrise
     if (sunrise > firstTime && sunrise < lastTime) {
       const sunriseIndex = dataPoints.findIndex((p: UVDataPoint) => p.timestamp >= sunrise);
       if (sunriseIndex > 0) {
-        const xStart = xScale.left;
-        const xEnd = xScale.getPixelForTick(sunriseIndex);
-        this.drawShading(ctx, xStart, xEnd, yScale.top, yScale.bottom, 'night');
+        this.drawShading(ctx, xScale.left, barX(sunriseIndex), yScale.top, yScale.bottom, 'night');
       }
     }
 
-    // Calculate night time after sunset
+    // Shade night period after sunset
     if (sunset > firstTime && sunset < lastTime) {
       const sunsetIndex = dataPoints.findIndex((p: UVDataPoint) => p.timestamp >= sunset);
       if (sunsetIndex >= 0) {
-        const xStart = xScale.getPixelForTick(sunsetIndex);
-        const xEnd = xScale.right;
-        this.drawShading(ctx, xStart, xEnd, yScale.top, yScale.bottom, 'night');
+        this.drawShading(ctx, barX(sunsetIndex), xScale.right, yScale.top, yScale.bottom, 'night');
       }
     }
   }
