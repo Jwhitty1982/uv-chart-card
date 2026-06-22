@@ -441,26 +441,21 @@ export class UVIndexChartCard extends LitElement {
 
     if (!xScale || !yScale) return;
 
-    // Position the line at the bar closest to current time.
+    // Draw the NOW line at the boundary between synthetic past and forecast.
+    // Using timestamp-proximity caused off-by-one: the first forecast bar is at
+    // the next hourly boundary (e.g. 2:00 PM), which wins over the last synthetic
+    // bar (1:00 PM) even when the actual time is 1:41 PM.
     const dataPoints = chart.data.datasets[0].metadata?.dataPoints || [];
     if (!dataPoints.length) return;
 
-    const nowTs = Date.now();
-    let currentIndex = 0;
-    let minDelta = Number.POSITIVE_INFINITY;
+    // Find the index of the first forecast bar; the NOW line sits on its left edge.
+    const splitIndex = dataPoints.findIndex((p: UVDataPoint) => p.isForecast);
+    if (splitIndex < 1) return; // nothing to draw if no split
 
-    dataPoints.forEach((p: UVDataPoint, index: number) => {
-      const delta = Math.abs(p.timestamp - nowTs);
-      if (delta < minDelta) {
-        minDelta = delta;
-        currentIndex = index;
-      }
-    });
-
-    // Bar center x: evenly spaced across the plot area
+    // Left edge of the first forecast bar = right edge of last synthetic bar
     const numBars = chart.data.labels?.length || 1;
     const barStep = (xScale.right - xScale.left) / numBars;
-    const xPos = xScale.left + (currentIndex + 0.5) * barStep;
+    const xPos = xScale.left + splitIndex * barStep;
 
     // Draw dashed vertical line
     ctx.save();
@@ -514,28 +509,32 @@ export class UVIndexChartCard extends LitElement {
     const xPos = xScale.left + (peakIndex + 0.5) * barStep;
     const yPos = yScale.getPixelForValue(peakUV);
 
-    // Draw glowing effect
+    // Draw glowing halo
     ctx.save();
-    const gradient = ctx.createRadialGradient(xPos, yPos, 0, xPos, yPos, 12);
-    gradient.addColorStop(0, 'rgba(255, 255, 0, 0.6)');
-    gradient.addColorStop(1, 'rgba(255, 255, 0, 0)');
+    const gradient = ctx.createRadialGradient(xPos, yPos, 0, xPos, yPos, 10);
+    gradient.addColorStop(0, 'rgba(255, 200, 0, 0.55)');
+    gradient.addColorStop(1, 'rgba(255, 200, 0, 0)');
     ctx.fillStyle = gradient;
     ctx.beginPath();
-    ctx.arc(xPos, yPos, 12, 0, Math.PI * 2);
+    ctx.arc(xPos, yPos, 10, 0, Math.PI * 2);
     ctx.fill();
 
     // Draw dot
     ctx.fillStyle = '#FFD700';
     ctx.beginPath();
-    ctx.arc(xPos, yPos, 6, 0, Math.PI * 2);
+    ctx.arc(xPos, yPos, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Draw border
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(xPos, yPos, 6, 0, Math.PI * 2);
+    // White border
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.lineWidth = 1.5;
     ctx.stroke();
+
+    // "PEAK" label below the dot
+    ctx.fillStyle = 'rgba(255, 220, 0, 0.9)';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('PEAK', xPos, yPos + 18);
 
     ctx.restore();
   }
@@ -609,26 +608,26 @@ export class UVIndexChartCard extends LitElement {
   static styles = css`
     :host {
       display: block;
-      --card-background: rgba(255, 255, 255, 0.08);
-      --card-border-color: rgba(255, 255, 255, 0.15);
+      --card-background: rgba(255, 255, 255, 0.04);
+      --card-border-color: rgba(255, 255, 255, 0.08);
     }
 
     .card {
       background: var(--card-background);
-      backdrop-filter: blur(20px) saturate(180%);
-      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      backdrop-filter: blur(12px) saturate(140%);
+      -webkit-backdrop-filter: blur(12px) saturate(140%);
       border: 1px solid var(--card-border-color);
-      border-radius: 20px;
-      padding: 24px;
+      border-radius: 16px;
+      padding: 20px;
       color: rgba(255, 255, 255, 0.87);
-      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+      box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.25);
       transition: all 0.3s ease;
     }
 
     .card:hover {
-      background: rgba(255, 255, 255, 0.1);
-      border-color: rgba(255, 255, 255, 0.25);
-      box-shadow: 0 8px 40px 0 rgba(31, 38, 135, 0.45);
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(255, 255, 255, 0.14);
+      box-shadow: 0 6px 24px 0 rgba(0, 0, 0, 0.35);
     }
 
     .header {
