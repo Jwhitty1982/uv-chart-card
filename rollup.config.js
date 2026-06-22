@@ -1,12 +1,12 @@
 import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import typescript from '@rollup/plugin-typescript';
-import { terser } from 'rollup-plugin-terser';
+import terser from '@rollup/plugin-terser';
 
 export default {
   input: 'src/uv-index-chart-card.ts',
   output: {
-    file: 'dist/uv-index-chart-card.js',
+    file: 'uv-index-chart-card.js',
     format: 'iife',
     name: 'UVIndexChartCard'
   },

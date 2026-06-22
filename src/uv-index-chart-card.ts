@@ -343,7 +343,7 @@ export class UVIndexChartCard extends LitElement {
               color: 'rgba(255, 255, 255, 0.7)',
               font: {
                 size: 12,
-                weight: '600'
+                weight: 600 as const
               },
               padding: 15
             }
@@ -374,9 +374,9 @@ export class UVIndexChartCard extends LitElement {
           x: {
             stacked: false,
             grid: {
-              color: 'rgba(255, 255, 255, 0.1)',
-              drawBorder: false
+              color: 'rgba(255, 255, 255, 0.1)'
             },
+            border: { display: false },
             ticks: {
               color: 'rgba(255, 255, 255, 0.6)',
               font: {
@@ -391,9 +391,9 @@ export class UVIndexChartCard extends LitElement {
             max: 16,
             stacked: false,
             grid: {
-              color: 'rgba(255, 255, 255, 0.08)',
-              drawBorder: false
+              color: 'rgba(255, 255, 255, 0.08)'
             },
+            border: { display: false },
             ticks: {
               color: 'rgba(255, 255, 255, 0.6)',
               font: {
@@ -407,7 +407,7 @@ export class UVIndexChartCard extends LitElement {
               color: 'rgba(255, 255, 255, 0.7)',
               font: {
                 size: 12,
-                weight: '600'
+                weight: 600 as const
               }
             }
           }
