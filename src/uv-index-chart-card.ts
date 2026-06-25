@@ -310,13 +310,15 @@ export class UVIndexChartCard extends LitElement {
     const start = new Date(anchorTs - hoursBack * 3600000).toISOString();
     const end   = new Date(anchorTs).toISOString();
     try {
+      // NOTE: do NOT use minimal_response=true — with that flag HA only returns
+      // `last_changed` (not `last_updated`) on all records after the first, so
+      // every timestamp lookup would yield NaN and all slots would be empty.
+      // no_attributes=true still keeps the payload small while preserving
+      // last_updated on every record.
       const result: { state: string; last_updated: string }[][] =
         await this._hass.callApi(
           'GET',
-          // significant_changes_only=false ensures every state change is returned,
-          // not just those that differ from the previous recorded value.
-          // minimal_response keeps payload small (no attributes).
-          `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&minimal_response=true&significant_changes_only=false`
+          `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&no_attributes=true&significant_changes_only=false`
         );
       const records = result?.[0] ?? [];
       if (!records.length) {
@@ -324,36 +326,39 @@ export class UVIndexChartCard extends LitElement {
         return [];
       }
 
-      console.debug(`UV Chart Card: loaded ${records.length} history records for ${entityId}`);
+      // Parse, validate, and sort ascending so forward-fill works correctly
+      const sorted = records
+        .map(r => ({ ts: new Date(r.last_updated).getTime(), uv: parseFloat(r.state) }))
+        .filter(r => isFinite(r.ts) && isFinite(r.uv) && r.uv >= 0)
+        .sort((a, b) => a.ts - b.ts);
 
+      if (!sorted.length) {
+        console.warn(`UV Chart Card: history for ${entityId} contained no parseable states`);
+        return [];
+      }
+
+      console.debug(`UV Chart Card: ${sorted.length} history readings for ${entityId}`);
+
+      // Seed from the oldest record HA returned — HA includes the state active at
+      // window-start as the first entry even if it was recorded before the window.
+      let lastKnownUV = sorted[0].uv;
       const data: UVDataPoint[] = [];
-
-      // Seed lastKnownUV from the very first record, which HA provides as the
-      // state that was active at the start of the window (may be timestamped
-      // before our window — that is intentional).
-      let lastKnownUV = 0;
-      const seedState = parseFloat(records[0]?.state ?? '');
-      if (!isNaN(seedState) && seedState >= 0) lastKnownUV = seedState;
 
       for (let i = hoursBack; i > 0; i--) {
         const slotEnd   = anchorTs - (i - 1) * 3600000;
         const slotStart = slotEnd - 3600000;
-        // Take the last recorded value that falls within this 1-hour bucket
-        const inSlot = records.filter(r => {
-          const ts = new Date(r.last_updated).getTime();
-          return ts >= slotStart && ts < slotEnd;
-        });
-        const last = inSlot[inSlot.length - 1];
-        if (last) {
-          const parsed = parseFloat(last.state);
-          if (!isNaN(parsed) && parsed >= 0) lastKnownUV = parsed;
+
+        // Advance lastKnownUV with the last reading that fell in this slot
+        const inSlot = sorted.filter(r => r.ts >= slotStart && r.ts < slotEnd);
+        if (inSlot.length > 0) {
+          lastKnownUV = inSlot[inSlot.length - 1].uv;
         }
-        // Use the last valid reading in this slot, or forward-fill from the
-        // previous slot (handles sensors that only report on change).
-        const slotUV = last ? (parseFloat(last.state) || 0) : lastKnownUV;
+        // If no reading in this slot → forward-fill with lastKnownUV (handles
+        // sensors that only report on change, e.g. Hubitat)
+
         data.push({
           timestamp: slotStart + 1800000, // midpoint of the slot
-          uv: slotUV,
+          uv: lastKnownUV,
           isSynthetic: false,
           isForecast: false
         });
