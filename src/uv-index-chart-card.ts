@@ -159,10 +159,19 @@ export class UVIndexChartCard extends LitElement {
     try {
       const data = await this.prepareChartData();
       if (token !== this._updateToken) return; // a newer call superseded this one
+
+      // Entity not available yet — retry in 3 s rather than crash / show blank card
+      if (!data?.datasets?.[0]?.data) {
+        if (token === this._updateToken) setTimeout(() => this.updateChart(), 3000);
+        return;
+      }
+
       if (this.chart) this.chart.destroy();
       this.chart = this.createChart(canvas, data);
     } catch (error) {
       console.error('UV Chart Card Error:', error);
+      // Retry on transient errors (e.g. history API timeout on first load)
+      if (token === this._updateToken) setTimeout(() => this.updateChart(), 5000);
     }
   }
 
@@ -210,9 +219,16 @@ export class UVIndexChartCard extends LitElement {
         firstForecastTimestamp,
         hoursBack
       );
-      pastData = history.length > 0
-        ? history
-        : this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
+      if (history.length > 0) {
+        pastData = history;
+      } else {
+        // History unavailable — use realtime sensor's current state as anchor so
+        // synthetic bars are visible even when the forecast UV is currently 0
+        const rtEntity = this._hass?.states[this.config.uv_realtime_entity];
+        const rtUV = parseFloat(rtEntity?.state ?? '') || 0;
+        const syntheticAnchor = Math.max(firstForecastUV, rtUV);
+        pastData = this.generateSyntheticPastData(syntheticAnchor, firstForecastTimestamp, hoursBack);
+      }
     } else {
       pastData = this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
     }
@@ -297,12 +313,28 @@ export class UVIndexChartCard extends LitElement {
       const result: { state: string; last_updated: string }[][] =
         await this._hass.callApi(
           'GET',
-          `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&minimal_response=true`
+          // significant_changes_only=false ensures every state change is returned,
+          // not just those that differ from the previous recorded value.
+          // minimal_response keeps payload small (no attributes).
+          `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&minimal_response=true&significant_changes_only=false`
         );
       const records = result?.[0] ?? [];
-      if (!records.length) return [];
+      if (!records.length) {
+        console.warn(`UV Chart Card: no history found for ${entityId} (${start} → ${end})`);
+        return [];
+      }
+
+      console.debug(`UV Chart Card: loaded ${records.length} history records for ${entityId}`);
 
       const data: UVDataPoint[] = [];
+
+      // Seed lastKnownUV from the very first record, which HA provides as the
+      // state that was active at the start of the window (may be timestamped
+      // before our window — that is intentional).
+      let lastKnownUV = 0;
+      const seedState = parseFloat(records[0]?.state ?? '');
+      if (!isNaN(seedState) && seedState >= 0) lastKnownUV = seedState;
+
       for (let i = hoursBack; i > 0; i--) {
         const slotEnd   = anchorTs - (i - 1) * 3600000;
         const slotStart = slotEnd - 3600000;
@@ -312,16 +344,23 @@ export class UVIndexChartCard extends LitElement {
           return ts >= slotStart && ts < slotEnd;
         });
         const last = inSlot[inSlot.length - 1];
+        if (last) {
+          const parsed = parseFloat(last.state);
+          if (!isNaN(parsed) && parsed >= 0) lastKnownUV = parsed;
+        }
+        // Use the last valid reading in this slot, or forward-fill from the
+        // previous slot (handles sensors that only report on change).
+        const slotUV = last ? (parseFloat(last.state) || 0) : lastKnownUV;
         data.push({
           timestamp: slotStart + 1800000, // midpoint of the slot
-          uv: last ? (parseFloat(last.state) || 0) : 0,
+          uv: slotUV,
           isSynthetic: false,
           isForecast: false
         });
       }
       return data;
     } catch (err) {
-      console.warn('UV Card: history API error, falling back to synthetic data', err);
+      console.warn('UV Chart Card: history API error, falling back to synthetic data', err);
       return [];
     }
   }
@@ -429,10 +468,12 @@ export class UVIndexChartCard extends LitElement {
     const nowLinePlugin = {
       id: 'nowLinePlugin',
       afterDraw: (chart: any) => {
-        this.drawSunriseSetShading(chart, data.datasets[0].metadata);
-        this.drawMidnightLines(chart, data.datasets[0].metadata);
+        const metadata = data.datasets[0]?.metadata;
+        if (!metadata?.dataPoints?.length) return;
+        this.drawSunriseSetShading(chart, metadata);
+        this.drawMidnightLines(chart, metadata);
         this.drawNowLine(chart);
-        this.drawPeakUVMarker(chart, data.datasets[0].metadata);
+        this.drawPeakUVMarker(chart, metadata);
       }
     };
 
