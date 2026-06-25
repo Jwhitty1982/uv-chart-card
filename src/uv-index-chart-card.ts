@@ -348,10 +348,12 @@ export class UVIndexChartCard extends LitElement {
         const slotEnd   = anchorTs - (i - 1) * 3600000;
         const slotStart = slotEnd - 3600000;
 
-        // Advance lastKnownUV with the last reading that fell in this slot
+        // Use the peak reading within each slot — UV sensors should show the
+        // highest value reached in the hour, not the last (which may be lower
+        // if the sensor reported a drop at the end of the window).
         const inSlot = sorted.filter(r => r.ts >= slotStart && r.ts < slotEnd);
         if (inSlot.length > 0) {
-          lastKnownUV = inSlot[inSlot.length - 1].uv;
+          lastKnownUV = Math.max(...inSlot.map(r => r.uv));
         }
         // If no reading in this slot → forward-fill with lastKnownUV (handles
         // sensors that only report on change, e.g. Hubitat)
