@@ -57,6 +57,8 @@ interface SunTimes {
  */
 interface UVCardConfig {
   entity: string;
+  /** Real-time UV sensor (e.g. Hubitat) used to populate the historical past bars */
+  uv_realtime_entity?: string;
   hours_back?: number;
   hours_forward?: number;
   [key: string]: any;
@@ -69,9 +71,15 @@ export class UVIndexChartCard extends LitElement {
   private _hass: any;
   private _lastEntityState: string = '';
   private _lastEntityHourly: string = '';
+  /** Incremented on every updateChart() call; stale async runs abort when token mismatches */
+  private _updateToken = 0;
 
   set hass(h: any) {
     this._hass = h;
+    // Always re-render the Lit template (cheap) so the realtime UV value in the
+    // header stays current even when the forecast hasn't changed yet.
+    this.requestUpdate();
+    // Only rebuild the chart when forecast data actually changes (expensive async op).
     const entity = h?.states?.[this.config?.entity!];
     const newState = entity?.state ?? '';
     const newHourly = JSON.stringify(entity?.attributes?.hourly?.[0]) ?? '';
@@ -88,6 +96,23 @@ export class UVIndexChartCard extends LitElement {
   private chart: Chart | null = null;
   private chartContainer: HTMLCanvasElement | null = null;
   private _resizeObserver: ResizeObserver | null = null;
+
+  /** Tells Lovelace which element to render in the visual card editor */
+  static getConfigElement() {
+    return document.createElement('uv-index-chart-card-editor');
+  }
+
+  /** Provides a default config when the card is added from the UI */
+  static getStubConfig(hass: any): UVCardConfig {
+    const uvForecast = Object.keys(hass?.states ?? {}).find(e =>
+      e.startsWith('sensor.') && (e.includes('uv') || e.includes('ultraviolet'))
+    );
+    return {
+      entity: uvForecast ?? 'sensor.openweathermap_uv_index',
+      hours_back: 12,
+      hours_forward: 24
+    };
+  }
 
   /**
    * Validate configuration when it's set
@@ -123,19 +148,18 @@ export class UVIndexChartCard extends LitElement {
   }
 
   /**
-   * Initialize or update the Chart.js instance
+   * Initialize or update the Chart.js instance.
+   * Async so history can be fetched from the HA Recorder API.
    */
-  private updateChart() {
+  private async updateChart() {
     const canvas = this.shadowRoot?.querySelector('#uvChart') as HTMLCanvasElement;
     if (!canvas) return;
 
+    const token = ++this._updateToken;
     try {
-      // Destroy existing chart to prevent memory leaks
-      if (this.chart) {
-        this.chart.destroy();
-      }
-
-      const data = this.prepareChartData();
+      const data = await this.prepareChartData();
+      if (token !== this._updateToken) return; // a newer call superseded this one
+      if (this.chart) this.chart.destroy();
       this.chart = this.createChart(canvas, data);
     } catch (error) {
       console.error('UV Chart Card Error:', error);
@@ -153,7 +177,16 @@ export class UVIndexChartCard extends LitElement {
    * 4. Create labels with timestamps
    * 5. Apply risk-based colors to each bar
    */
-  private prepareChartData(): any {
+  /**
+   * Prepare data for Chart.js.
+   *
+   * Past segment: if uv_realtime_entity is configured, real measured values are
+   * fetched from the HA Recorder history API and bucketed into hourly slots.
+   * Falls back to synthetic fade when history is unavailable.
+   *
+   * Forecast segment: hourly UV from the OWM entity's `hourly` attribute.
+   */
+  private async prepareChartData(): Promise<any> {
     const entity = this._hass?.states[this.config.entity!];
     if (!entity) {
       console.warn(`Entity ${this.config.entity} not found`);
@@ -162,56 +195,49 @@ export class UVIndexChartCard extends LitElement {
 
     const hoursBack = this.config.hours_back || 12;
     const hoursForward = this.config.hours_forward || 24;
-    const currentUV = parseFloat(entity.state) || 0;
     const hourlyData = entity.attributes?.hourly || [];
 
-    // Process forecast data from entity attributes (OpenWeatherMap One Call style)
-    // Supports hourly items such as: { dt: 1719032400, uvi: 4.2 }.
+    // Forecast segment
     const forecastData = this.processForecastData(hourlyData, hoursForward);
-
-    // Add a synthetic past segment before the first forecast point.
-    // This creates the desired 12h past + 24h future window.
     const firstForecastTimestamp = forecastData[0]?.timestamp ?? Date.now();
-    const firstForecastUV = forecastData[0]?.uv ?? currentUV;
-    const pastData = this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
+    const firstForecastUV = forecastData[0]?.uv ?? (parseFloat(entity.state) || 0);
 
-    // Combine all data points
+    // Past segment — real history when available, synthetic fade otherwise
+    let pastData: UVDataPoint[];
+    if (this.config.uv_realtime_entity) {
+      const history = await this.loadPastDataFromHistory(
+        this.config.uv_realtime_entity,
+        firstForecastTimestamp,
+        hoursBack
+      );
+      pastData = history.length > 0
+        ? history
+        : this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
+    } else {
+      pastData = this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
+    }
+
     const allData = [...pastData, ...forecastData];
-
-    // Generate labels from each data point timestamp
-    const now = new Date();
-    const labels = allData.map((point) => {
-      const time = new Date(point.timestamp);
-      return time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-    });
-
-    // Apply color coding based on UV risk levels
-    const colors = allData.map(point => this.getUVColor(point.uv));
-
-    // Load sunrise/sunset shading
+    const labels = allData.map(p =>
+      new Date(p.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    );
+    const colors = allData.map(p => this.getUVColor(p.uv));
     const sunTimes = this.getSunTimes();
 
     return {
       labels,
-      datasets: [
-        {
-          label: 'UV Index',
-          data: allData.map(p => p.uv),
-          backgroundColor: colors,
-          borderColor: colors,
-          borderWidth: 0,
-          borderRadius: 6,
-          borderSkipped: false,
-          barPercentage: 0.9,
-          categoryPercentage: 1.0,
-          // Store original data for use in plugins
-          metadata: {
-            dataPoints: allData,
-            sunTimes,
-            currentTime: now
-          }
-        }
-      ]
+      datasets: [{
+        label: 'UV Index',
+        data: allData.map(p => p.uv),
+        backgroundColor: colors,
+        borderColor: colors,
+        borderWidth: 0,
+        borderRadius: 6,
+        borderSkipped: false,
+        barPercentage: 0.9,
+        categoryPercentage: 1.0,
+        metadata: { dataPoints: allData, sunTimes, currentTime: new Date() }
+      }]
     };
   }
 
@@ -247,6 +273,57 @@ export class UVIndexChartCard extends LitElement {
     }
 
     return data;
+  }
+
+  /**
+   * Fetch real UV history from the HA Recorder API for the past window.
+   *
+   * Calls GET /api/history/period/{start} and buckets the returned state
+   * changes into one UVDataPoint per hour, using the last recorded reading
+   * within each slot. Falls back to an empty array on any error.
+   *
+   * @param entityId   - e.g. "sensor.weather_ultravioleetindx"
+   * @param anchorTs   - the start of the forecast (end of the history window)
+   * @param hoursBack  - how many 1-hour buckets to build
+   */
+  private async loadPastDataFromHistory(
+    entityId: string,
+    anchorTs: number,
+    hoursBack: number
+  ): Promise<UVDataPoint[]> {
+    const start = new Date(anchorTs - hoursBack * 3600000).toISOString();
+    const end   = new Date(anchorTs).toISOString();
+    try {
+      const result: { state: string; last_updated: string }[][] =
+        await this._hass.callApi(
+          'GET',
+          `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&minimal_response=true`
+        );
+      const records = result?.[0] ?? [];
+      if (!records.length) return [];
+
+      const data: UVDataPoint[] = [];
+      for (let i = hoursBack; i > 0; i--) {
+        const slotEnd   = anchorTs - (i - 1) * 3600000;
+        const slotStart = slotEnd - 3600000;
+        // Take the last recorded value that falls within this 1-hour bucket
+        const inSlot = records.filter(r => {
+          const ts = new Date(r.last_updated).getTime();
+          return ts >= slotStart && ts < slotEnd;
+        });
+        const last = inSlot[inSlot.length - 1];
+        data.push({
+          timestamp: slotStart + 1800000, // midpoint of the slot
+          uv: last ? (parseFloat(last.state) || 0) : 0,
+          isSynthetic: false,
+          isForecast: false
+        });
+      }
+      return data;
+    } catch (err) {
+      console.warn('UV Card: history API error, falling back to synthetic data', err);
+      return [];
+    }
   }
 
   /**
@@ -886,7 +963,11 @@ export class UVIndexChartCard extends LitElement {
       `;
     }
 
-    const currentUV = parseFloat(entity.state) || 0;
+    // Prefer the realtime sensor (e.g. Hubitat) for the current UV display value
+    const rtEntity = this.config.uv_realtime_entity
+      ? this._hass?.states[this.config.uv_realtime_entity]
+      : null;
+    const currentUV = parseFloat(rtEntity?.state ?? entity.state) || 0;
     const currentTime = new Date();
 
     return html`
@@ -941,9 +1022,69 @@ export class UVIndexChartCard extends LitElement {
   }
 }
 
-// Register the custom element
+/**
+ * Visual card editor — rendered inside the Lovelace "Edit card" dialog.
+ * Uses ha-form + HA selectors so entity pickers, number steppers etc. are
+ * provided automatically without custom UI code.
+ */
+@customElement('uv-index-chart-card-editor')
+export class UVIndexChartCardEditor extends LitElement {
+  @property() hass: any;
+  @property() config: UVCardConfig = { entity: '' };
+
+  setConfig(config: UVCardConfig) {
+    this.config = config;
+  }
+
+  private get _schema() {
+    return [
+      {
+        name: 'entity',
+        required: true,
+        label: 'Forecast entity  (needs hourly UV attribute — e.g. OWM)',
+        selector: { entity: { domain: 'sensor' } }
+      },
+      {
+        name: 'uv_realtime_entity',
+        label: 'Realtime UV sensor  (historical bars — e.g. Hubitat)',
+        selector: { entity: { domain: 'sensor' } }
+      },
+      {
+        name: 'hours_back',
+        label: 'Hours of history to show',
+        selector: { number: { min: 1, max: 48, step: 1, mode: 'box' } }
+      },
+      {
+        name: 'hours_forward',
+        label: 'Forecast hours to show',
+        selector: { number: { min: 1, max: 48, step: 1, mode: 'box' } }
+      }
+    ];
+  }
+
+  private _valueChanged(ev: CustomEvent) {
+    const config = { ...this.config, ...(ev.detail.value as UVCardConfig) };
+    this.dispatchEvent(new CustomEvent('config-changed', { detail: { config } }));
+  }
+
+  protected render() {
+    if (!this.hass) return html``;
+    return html`
+      <ha-form
+        .hass=${this.hass}
+        .data=${this.config}
+        .schema=${this._schema}
+        .computeLabel=${(s: { label?: string; name: string }) => s.label ?? s.name}
+        @value-changed=${this._valueChanged}
+      ></ha-form>
+    `;
+  }
+}
+
+// Register the custom elements
 declare global {
   interface HTMLElementTagNameMap {
     'uv-index-chart-card': UVIndexChartCard;
+    'uv-index-chart-card-editor': UVIndexChartCardEditor;
   }
 }
