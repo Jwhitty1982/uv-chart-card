@@ -206,10 +206,17 @@ export class UVIndexChartCard extends LitElement {
     const hoursForward = this.config.hours_forward || 24;
     const hourlyData = entity.attributes?.hourly || [];
 
+    // Get the true current UV value (prefer realtime sensor over forecast)
+    let currentUV = parseFloat(entity.state) || 0;
+    if (this.config.uv_realtime_entity) {
+      const rtEntity = this._hass?.states[this.config.uv_realtime_entity];
+      const rtUV = parseFloat(rtEntity?.state ?? '') || 0;
+      if (isFinite(rtUV)) currentUV = rtUV;
+    }
+
     // Forecast segment
     const forecastData = this.processForecastData(hourlyData, hoursForward);
     const firstForecastTimestamp = forecastData[0]?.timestamp ?? Date.now();
-    const firstForecastUV = forecastData[0]?.uv ?? (parseFloat(entity.state) || 0);
 
     // Past segment — real history when available, synthetic fade otherwise
     let pastData: UVDataPoint[];
@@ -222,15 +229,12 @@ export class UVIndexChartCard extends LitElement {
       if (history.length > 0) {
         pastData = history;
       } else {
-        // History unavailable — use realtime sensor's current state as anchor so
-        // synthetic bars are visible even when the forecast UV is currently 0
-        const rtEntity = this._hass?.states[this.config.uv_realtime_entity];
-        const rtUV = parseFloat(rtEntity?.state ?? '') || 0;
-        const syntheticAnchor = Math.max(firstForecastUV, rtUV);
-        pastData = this.generateSyntheticPastData(syntheticAnchor, firstForecastTimestamp, hoursBack);
+        // History unavailable — use current sensor value as anchor
+        pastData = this.generateSyntheticPastData(currentUV, firstForecastTimestamp, hoursBack);
       }
     } else {
-      pastData = this.generateSyntheticPastData(firstForecastUV, firstForecastTimestamp, hoursBack);
+      // No realtime sensor — use current forecast or entity state as anchor
+      pastData = this.generateSyntheticPastData(currentUV, firstForecastTimestamp, hoursBack);
     }
 
     const allData = [...pastData, ...forecastData];
@@ -328,7 +332,7 @@ export class UVIndexChartCard extends LitElement {
 
       // Parse, validate, and sort ascending so forward-fill works correctly
       const sorted = records
-        .map(r => ({ ts: new Date(r.last_updated ?? r.last_changed).getTime(), uv: parseFloat(r.state) }))
+        .map(r => ({ ts: new Date(r.last_updated || r.last_changed || '').getTime(), uv: parseFloat(r.state) }))
         .filter(r => isFinite(r.ts) && isFinite(r.uv) && r.uv >= 0)
         .sort((a, b) => a.ts - b.ts);
 
