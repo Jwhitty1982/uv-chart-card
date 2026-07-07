@@ -315,7 +315,7 @@ export class UVIndexChartCard extends LitElement {
       // every timestamp lookup would yield NaN and all slots would be empty.
       // no_attributes=true still keeps the payload small while preserving
       // last_updated on every record.
-      const result: { state: string; last_updated: string }[][] =
+      const result: Array<Array<{ state: string; last_updated?: string; last_changed?: string }>> =
         await this._hass.callApi(
           'GET',
           `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&no_attributes=true&significant_changes_only=false`
@@ -328,7 +328,7 @@ export class UVIndexChartCard extends LitElement {
 
       // Parse, validate, and sort ascending so forward-fill works correctly
       const sorted = records
-        .map(r => ({ ts: new Date(r.last_updated).getTime(), uv: parseFloat(r.state) }))
+        .map(r => ({ ts: new Date(r.last_updated ?? r.last_changed).getTime(), uv: parseFloat(r.state) }))
         .filter(r => isFinite(r.ts) && isFinite(r.uv) && r.uv >= 0)
         .sort((a, b) => a.ts - b.ts);
 
@@ -348,19 +348,21 @@ export class UVIndexChartCard extends LitElement {
         const slotEnd   = anchorTs - (i - 1) * 3600000;
         const slotStart = slotEnd - 3600000;
 
-        // Use the peak reading within each slot — UV sensors should show the
-        // highest value reached in the hour, not the last (which may be lower
-        // if the sensor reported a drop at the end of the window).
+        // Use the highest value reached in the slot for the displayed bar,
+        // but carry the last known state forward across empty slots so future
+        // empty intervals preserve the current descending/ascending trend.
         const inSlot = sorted.filter(r => r.ts >= slotStart && r.ts < slotEnd);
+        let slotUV = lastKnownUV;
         if (inSlot.length > 0) {
-          lastKnownUV = Math.max(...inSlot.map(r => r.uv));
+          const slotPeakUV = Math.max(...inSlot.map(r => r.uv));
+          const slotLastUV = inSlot[inSlot.length - 1].uv;
+          lastKnownUV = slotLastUV;
+          slotUV = slotPeakUV;
         }
-        // If no reading in this slot → forward-fill with lastKnownUV (handles
-        // sensors that only report on change, e.g. Hubitat)
 
         data.push({
           timestamp: slotStart + 1800000, // midpoint of the slot
-          uv: lastKnownUV,
+          uv: slotUV,
           isSynthetic: false,
           isForecast: false
         });
