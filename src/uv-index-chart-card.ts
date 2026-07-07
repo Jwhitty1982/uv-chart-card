@@ -206,59 +206,33 @@ export class UVIndexChartCard extends LitElement {
     const hoursForward = this.config.hours_forward || 24;
     const hourlyData = entity.attributes?.hourly || [];
 
-    // Get the true current UV value (prefer realtime sensor over forecast)
-    let currentUV = parseFloat(entity.state) || 0;
-    if (this.config.uv_realtime_entity) {
-      const rtEntity = this._hass?.states[this.config.uv_realtime_entity];
-      if (rtEntity) {
-        const rtUV = parseFloat(rtEntity.state ?? '');
-        if (isFinite(rtUV)) currentUV = rtUV;
-      }
-    }
-
-    // Forecast segment
+    // Forecast segment only
     const forecastData = this.processForecastData(hourlyData, hoursForward);
-    const firstForecastTimestamp = forecastData[0]?.timestamp ?? Date.now();
-
-    // Past segment — real history when available, synthetic fade otherwise
-    let pastData: UVDataPoint[];
-    if (this.config.uv_realtime_entity) {
-      const history = await this.loadPastDataFromHistory(
-        this.config.uv_realtime_entity,
-        firstForecastTimestamp,
-        hoursBack
-      );
-      if (history.length > 0) {
-        pastData = history;
-      } else {
-        // History unavailable — use current sensor value as anchor
-        pastData = this.generateSyntheticPastData(currentUV, firstForecastTimestamp, hoursBack);
-      }
-    } else {
-      // No realtime sensor — use current forecast or entity state as anchor
-      pastData = this.generateSyntheticPastData(currentUV, firstForecastTimestamp, hoursBack);
+    
+    if (forecastData.length === 0) {
+      return { labels: [], datasets: [] };
     }
 
-    const allData = [...pastData, ...forecastData];
-    const labels = allData.map(p =>
+    const labels = forecastData.map(p =>
       new Date(p.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
     );
-    const colors = allData.map(p => this.getUVColor(p.uv));
-    const sunTimes = this.getSunTimes();
 
     return {
       labels,
       datasets: [{
-        label: 'UV Index',
-        data: allData.map(p => p.uv),
-        backgroundColor: colors,
-        borderColor: colors,
-        borderWidth: 0,
-        borderRadius: 6,
-        borderSkipped: false,
-        barPercentage: 0.9,
-        categoryPercentage: 1.0,
-        metadata: { dataPoints: allData, sunTimes, currentTime: new Date() }
+        label: 'UV Index Forecast',
+        data: forecastData.map(p => p.uv),
+        borderColor: 'rgba(255, 255, 255, 0.7)',
+        backgroundColor: 'rgba(255, 255, 255, 0.05)',
+        borderWidth: 2,
+        pointRadius: 4,
+        pointBackgroundColor: forecastData.map(p => this.getUVColor(p.uv)),
+        pointBorderColor: forecastData.map(p => this.getUVColor(p.uv)),
+        pointBorderWidth: 0,
+        fill: true,
+        tension: 0,
+        stepped: 'middle',
+        metadata: { dataPoints: forecastData, currentTime: new Date() }
       }]
     };
   }
@@ -487,9 +461,6 @@ export class UVIndexChartCard extends LitElement {
       afterDraw: (chart: any) => {
         const metadata = data.datasets[0]?.metadata;
         if (!metadata?.dataPoints?.length) return;
-        this.drawSunriseSetShading(chart, metadata);
-        this.drawMidnightLines(chart, metadata);
-        this.drawNowLine(chart);
         this.drawPeakUVMarker(chart, metadata);
       }
     };
@@ -499,7 +470,7 @@ export class UVIndexChartCard extends LitElement {
     const titleFontSize = Math.max(9, Math.min(12, cardWidth / 36));
 
     return new Chart(ctx, {
-      type: 'bar',
+      type: 'line',
       data,
       options: {
         responsive: true,
