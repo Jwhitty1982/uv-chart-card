@@ -210,8 +210,10 @@ export class UVIndexChartCard extends LitElement {
     let currentUV = parseFloat(entity.state) || 0;
     if (this.config.uv_realtime_entity) {
       const rtEntity = this._hass?.states[this.config.uv_realtime_entity];
-      const rtUV = parseFloat(rtEntity?.state ?? '') || 0;
-      if (isFinite(rtUV)) currentUV = rtUV;
+      if (rtEntity) {
+        const rtUV = parseFloat(rtEntity.state ?? '');
+        if (isFinite(rtUV)) currentUV = rtUV;
+      }
     }
 
     // Forecast segment
@@ -313,6 +315,7 @@ export class UVIndexChartCard extends LitElement {
   ): Promise<UVDataPoint[]> {
     const start = new Date(anchorTs - hoursBack * 3600000).toISOString();
     const end   = new Date(anchorTs).toISOString();
+    console.log(`UV Chart Card: fetching history for ${entityId} from ${start} to ${end}`);
     try {
       // NOTE: do NOT use minimal_response=true — with that flag HA only returns
       // `last_changed` (not `last_updated`) on all records after the first, so
@@ -325,8 +328,9 @@ export class UVIndexChartCard extends LitElement {
           `history/period/${start}?filter_entity_id=${entityId}&end_time=${end}&no_attributes=true&significant_changes_only=false`
         );
       const records = result?.[0] ?? [];
+      console.log(`UV Chart Card: got ${records.length} raw records from API for ${entityId}`);
       if (!records.length) {
-        console.warn(`UV Chart Card: no history found for ${entityId} (${start} → ${end})`);
+        console.warn(`UV Chart Card: no history found for ${entityId} (${start} → ${end}) — this may mean the entity has no recorded state changes, or the recorder isn't tracking it`);
         return [];
       }
 
@@ -337,7 +341,7 @@ export class UVIndexChartCard extends LitElement {
         .sort((a, b) => a.ts - b.ts);
 
       if (!sorted.length) {
-        console.warn(`UV Chart Card: history for ${entityId} contained no parseable states`);
+        console.warn(`UV Chart Card: history for ${entityId} contained no parseable states (first record: state=${records[0]?.state}, last_updated=${records[0]?.last_updated}, last_changed=${records[0]?.last_changed})`);
         return [];
       }
 
